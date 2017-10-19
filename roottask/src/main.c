@@ -346,7 +346,7 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
     error = sel4utils_spawn_process_v(&process->process, &env.vka, &env.vspace,
                                       ARRAY_SIZE(argv), argv, 1);
     assert(error == 0);
-    ZF_LOGV("process spawned\n");
+    printf("process spawned\n");
     /* send env.init_data to the new process */
     send_init_data(&env, process->init_ep_obj.cptr, process);
 
