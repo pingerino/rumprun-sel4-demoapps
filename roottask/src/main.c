@@ -31,6 +31,7 @@
 #include <vka/object_capops.h>
 #include <arch_stdio.h>
 #include <utils/circular_buffer.h>
+#include <sel4/benchmark_utilisation_types.h>
 
 #include <vspace/vspace.h>
 #include "common.h"
@@ -250,18 +251,13 @@ int alloc_devices(rump_process_t *process) {
     return 0;
 }
 
-void launch_process(const char *bin_name, const char *cmdline, int id)
+void launch_process(const char *bin_name, int id, uint64_t period, void *stage, int prio, int crit)
 {
-    /* check rump kernel config string length */
-    if (strlen(RUMPCONFIG) + strlen(cmdline) > RUMP_CONFIG_MAX) {
-        ZF_LOGE("cmdline too long!");
-        return;
-    }
-
     /* create a frame that will act as the init data, we can then map
      * into target processes */
     rump_process_t *process = process_from_id(id);
     process->bin_name = bin_name;
+    process->period = period;
     process->init = (init_data_t *) vspace_new_pages(&env.vspace, seL4_AllRights, INIT_DATA_NUM_FRAMES, PAGE_BITS_4K);
     ZF_LOGF_IF(process->init == NULL, "Could not create init_data frame");
 
@@ -277,7 +273,7 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
 
     /* setup init priority.  Reduce by 2 so that we can have higher priority serial thread
        for benchmarking */
-    process->init->priority = seL4_MaxPrio - 2;
+    process->init->priority = prio;
     process->init->rumprun_memory_size = RUMP_DEV_RAM_MEMORY;
 
     error = vka_alloc_notification(&env.vka, &process->timer_signal);
@@ -295,6 +291,7 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
     sel4utils_process_config_t config = process_config_default_simple(&env.simple, bin_name, process->init->priority);
     config = process_config_mcp(config, process->init->priority);
     config = process_config_fault_cptr(config, badged_ep_path.capPtr);
+    config = process_config_criticality(config, crit);
 
     /* Set up rumprun process */
     error = sel4utils_configure_process_custom(&process->process, &env.vka, &env.vspace, config);
@@ -329,7 +326,7 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
     alloc_untypeds(process);
     alloc_devices(process);
     copy_untypeds_to_process(process);
-    process->init->tsc_freq = simple_get_arch_info(&env.simple);
+    process->init->tsc_freq = simple_get_arch_info(&env.simple) * 1000000;
 
     /* copy the rpc endpoint - we wait on the endpoint for a message
      * or a fault to see when the process finishes */
@@ -370,6 +367,18 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
     vka_alloc_endpoint(&env.vka, &process->init_ep_obj);
     seL4_CPtr init_ep = sel4utils_copy_cap_to_process(&process->process, &env.vka, process->init_ep_obj.cptr);
 
+    process->init->remote_stage_vaddr = vspace_share_mem(&env.vspace, &process->process.vspace, stage,
+                                          INIT_DATA_NUM_FRAMES, PAGE_BITS_4K, seL4_AllRights, true);
+
+    ZF_LOGF_IF(process->init->remote_stage_vaddr == NULL, "Failed to share remote stage page");
+
+    /* allocate a large page for results and share it with the vspace */
+    process->results = vspace_new_pages(&env.vspace, seL4_AllRights, 1, seL4_LargePageBits);
+    ZF_LOGF_IF(process->results == NULL, "Failed to allocate large page for results");
+
+   process->init->remote_results_vaddr = vspace_share_mem(&env.vspace, &process->process.vspace, process->results, 1, seL4_LargePageBits, seL4_AllRights, true);
+    ZF_LOGF_IF(process->init->remote_results_vaddr == NULL, "Failed to share results page");
+
     /* WARNING: DO NOT COPY MORE CAPS TO THE PROCESS BEYOND THIS POINT,
      * AS THE SLOTS WILL BE CONSIDERED FREE AND OVERRIDDEN BY THE PROCESS. */
     /* set up free slot range */
@@ -377,6 +386,12 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
     process->init->free_slots.start = init_ep + 1;
     process->init->free_slots.end = BIT(CONFIG_SEL4UTILS_CSPACE_SIZE_BITS);
     assert(process->init->free_slots.start < process->init->free_slots.end);
+    char cmdline[200];
+    snprintf(cmdline, 200, "%s %lu %lu %lu %lu %lu %lu", bin_name,
+                                             (seL4_Word) process->init->remote_stage_vaddr, period,
+                                              process->init->rpc_ep, process->init->timer_signal,
+                                              process->init->tsc_freq,
+                                              (seL4_Word) process->init->remote_results_vaddr);
     snprintf(process->init->cmdline, RUMP_CONFIG_MAX, RUMPCONFIG, cmdline);
     NAME_THREAD(process->process.thread.tcb.cptr, bin_name);
 
@@ -394,11 +409,77 @@ void launch_process(const char *bin_name, const char *cmdline, int id)
 
 }
 
+static volatile int *stage;
+
 static int timer_callback(uintptr_t id)
 {
     assert(id < N_RUMP_PROCESSES);
     /* wake up the client */
     seL4_Signal(process_from_id(id)->timer_signal.cptr);
+    return 0;
+}
+
+static void output_data(int id) {
+
+    rump_process_t *process = process_from_id(id);
+    uint64_t period = process->period;
+    uint64_t *data = (uint64_t *) process->results;
+
+    if (data == NULL) {
+        return;
+    }
+    printf("%s\nstage\tmissed\tjobs\n", process->bin_name);
+    int missed = 0;
+    int n = 0;
+    uint64_t stage = 0;
+    for (int i = 0; data[i] != 0 && data[i + 1] != 0; i+=3) {
+        uint64_t start = data[i];
+        uint64_t finished = data[i+1];
+        uint64_t deadline = start + period;
+        if (data[i+2] != stage) {
+            printf("%lu\t%d\t%d\n", stage, missed, n);
+            n = 0;
+            missed = 0;
+        }
+        stage = data[i+2];
+        if (finished > deadline) {
+            missed++;
+        }
+        n++;
+    }
+
+    printf("%lu\t%d\t%d\n", stage, missed, n);
+}
+
+
+static seL4_Word idle_thread_util[seL4_MaxCrit+1];
+
+static int benchmark_callback(uintptr_t id)
+{
+    assert(id == 0);
+
+    uint64_t *ipcbuffer = (uint64_t *) &(seL4_GetIPCBuffer()->msg[0]);
+    seL4_BenchmarkFinalizeLog();
+    seL4_BenchmarkGetThreadUtilisation(seL4_CapInitThreadTCB);
+    idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_UTILISATION];
+    seL4_BenchmarkResetLog();
+
+    *stage = *stage + 1;
+    if (*stage <= seL4_MaxCrit) {
+        int error = seL4_SchedControl_SetCriticality(simple_get_sched_ctrl(&env.simple, 0), *stage);
+        ZF_LOGF_IF(error, "Failed to set criticality");
+    } else {
+
+        output_data(1);
+        output_data(2);
+        output_data(3);
+        printf("idle %lu, %lu, %lu\n", idle_thread_util[0],
+                                       idle_thread_util[1],
+                                       idle_thread_util[2]);
+        printf("All is well\n");
+        abort();
+    }
+
     return 0;
 }
 
@@ -485,16 +566,52 @@ run_rr(void)
     ZF_LOGV(RUMP_CMDLINE_FMT, bin_name);
     ZF_LOGV("  starting app\n");
 
-    launch_process(bin_name, CONFIG_RUMPRUN_COMMAND_LINE, 1);
+    void *stage_addr = vspace_new_pages(&env.vspace, seL4_AllRights, INIT_DATA_NUM_FRAMES, PAGE_BITS_4K);
+    stage = (int *) stage_addr;
+    *stage = 0;
+
+    int error = seL4_TCB_SetCriticality(simple_get_tcb(&env.simple), seL4_MaxCrit);
+    ZF_LOGF_IF(error, "Failed to set criticality");
+
+    launch_process("susan", 1, 180 * NS_IN_MS, stage_addr, 1, seL4_MinCrit + 2);
+    launch_process("cjpeg", 2, 100 * NS_IN_MS, stage_addr, 3, seL4_MinCrit + 1);
+    launch_process("madplay", 3, 112 * NS_IN_MS, stage_addr, 5, seL4_MinCrit);
+
+    /* register a timeout for ourselves, to transition between stages of the benchmark */
+    error = tm_alloc_id_at(&env.time_manager, N_RUMP_PROCESSES);
+    ZF_LOGF_IF(error, "Failed to allocate timeout id");
+
+
+    /* wait for each one to set a timeout */
+    seL4_Word badge = 0;
+    for (int i = 0; i < 3; i++) {
+        seL4_MessageInfo_t info = api_recv(env.ep.cptr, &badge, env.reply_obj.cptr);
+        if (badge > N_RUMP_PROCESSES) {
+            sel4platsupport_handle_timer_irq(&env.timer, badge);
+        } else {
+            seL4_Word label = seL4_MessageInfo_get_label(info);
+            ZF_LOGF_IF(label != TIMER_LABEL, "wrong label");
+            info = handle_timer_rpc(process_from_id(badge), badge, info);
+            api_reply(env.reply_obj.cptr, info);
+        }
+    }
+
+    /* tell them all to start */
+    timer_callback(1);
+    timer_callback(2);
+    timer_callback(3);
+
+    error = tm_register_cb(&env.time_manager, TIMEOUT_PERIODIC, 20 * NS_IN_S, 0, N_RUMP_PROCESSES, benchmark_callback, 0);
+    ZF_LOGF_IF(error, "Failed to register own cb");
 
     /* wait on it to finish, rpc or fault, report result */
     seL4_Word result = 0;
     bool reply = false;
-    int error = 0;
     seL4_MessageInfo_t info;
 
-    while (result == 0) {
-        seL4_Word badge = 0;
+    seL4_BenchmarkResetLog();
+
+       while (result == 0) {
 
         if (reply) {
             seL4_SetMR(0, error);
@@ -537,6 +654,7 @@ run_rr(void)
                 flush_stdio_buffers();
             }
             sel4platsupport_handle_timer_irq(&env.timer, badge);
+
             error = tm_update(&env.time_manager);
             ZF_LOGF_IF(error, "failed to update time manager");
         }
@@ -616,7 +734,7 @@ void *main_continued(void *arg UNUSED)
     error = seL4_TCB_BindNotification(simple_get_tcb(&env.simple), env.irq_ntfn.cptr);
     ZF_LOGF_IF(error, "Failed to bind timer notification and endpoint\n");
 
-    error = tm_init(&env.time_manager, &env.timer.ltimer, &env.ops, N_RUMP_PROCESSES);
+    error = tm_init(&env.time_manager, &env.timer.ltimer, &env.ops, N_RUMP_PROCESSES + 1);
     ZF_LOGF_IF(error, "Failed to init time manager");
 
     error = seL4_TCB_SetPriority(simple_get_tcb(&env.simple), seL4_MaxPrio);
