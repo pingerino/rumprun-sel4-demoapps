@@ -593,6 +593,7 @@ run_rr(void)
         seL4_MessageInfo_t info = api_recv(env.ep.cptr, &badge, env.reply_obj.cptr);
         if (badge > N_RUMP_PROCESSES) {
             sel4platsupport_handle_timer_irq(&env.timer, badge);
+            i--;
         } else {
             seL4_Word label = seL4_MessageInfo_get_label(info);
             ZF_LOGF_IF(label != TIMER_LABEL, "wrong label");
