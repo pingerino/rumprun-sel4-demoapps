@@ -453,15 +453,17 @@ static void output_data(int id) {
 
 
 static seL4_Word idle_thread_util[seL4_MaxCrit+1];
+static seL4_Word total_thread_util[seL4_MaxCrit+1];
 
 static int benchmark_callback(uintptr_t id)
 {
     assert(id == 0);
 
-    uint64_t *ipcbuffer = (uint64_t *) &(seL4_GetIPCBuffer()->msg[0]);
+    volatile uint64_t *ipcbuffer = (uint64_t *) &(seL4_GetIPCBuffer()->msg[0]);
     seL4_BenchmarkFinalizeLog();
     seL4_BenchmarkGetThreadUtilisation(seL4_CapInitThreadTCB);
     idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_UTILISATION];
+    total_thread_util[*stage] = ipcbuffer[BENCHMARK_TOTAL_UTILISATION];
     seL4_BenchmarkResetLog();
 
     *stage = *stage + 1;
@@ -476,6 +478,9 @@ static int benchmark_callback(uintptr_t id)
         printf("idle %lu, %lu, %lu\n", idle_thread_util[0],
                                        idle_thread_util[1],
                                        idle_thread_util[2]);
+        printf("tot  %lu, %lu, %lu\n", total_thread_util[0],
+                                       total_thread_util[1],
+                                       total_thread_util[2]);
         printf("All is well\n");
         abort();
     }
@@ -755,14 +760,14 @@ void *main_continued(void *arg UNUSED)
     ZF_LOGF_IFERR(error, "Failed to bind serial irq");
 
     /* Create idle thread */
-    error = create_thread_handler(count_idle, 0, 100);
-    ZF_LOGF_IF(error, "Could not create idle thread");
+//    error = create_thread_handler(count_idle, 0, 100);
+ //   ZF_LOGF_IF(error, "Could not create idle thread");
 
-    if (config_set(CONFIG_USE_HOG_THREAD)) {
+    //if (config_set(CONFIG_USE_HOG_THREAD)) {
         /* Create hog thread */
-        error = create_thread_handler(hog_thread, seL4_MaxPrio - 1, CONFIG_HOG_BANDWIDTH);
-        ZF_LOGF_IF(error, "Could not create hog thread thread");
-    }
+    //    error = create_thread_handler(hog_thread, seL4_MaxPrio - 1, CONFIG_HOG_BANDWIDTH);
+    //    ZF_LOGF_IF(error, "Could not create hog thread thread");
+   // }
 
     /* now set up and run rumprun */
     run_rr();
