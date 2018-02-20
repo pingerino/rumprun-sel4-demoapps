@@ -462,7 +462,7 @@ static int benchmark_callback(uintptr_t id)
     volatile uint64_t *ipcbuffer = (uint64_t *) &(seL4_GetIPCBuffer()->msg[0]);
     seL4_BenchmarkFinalizeLog();
     seL4_BenchmarkGetThreadUtilisation(seL4_CapInitThreadTCB);
-    idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_UTILISATION];
+    idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION];
     total_thread_util[*stage] = ipcbuffer[BENCHMARK_TOTAL_UTILISATION];
     seL4_BenchmarkResetLog();
 
