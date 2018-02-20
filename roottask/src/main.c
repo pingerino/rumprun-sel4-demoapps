@@ -74,6 +74,7 @@ extern vspace_t *muslc_this_vspace;
 extern reservation_t muslc_brk_reservation;
 extern void *muslc_brk_reservation_start;
 extern char _cpio_archive[];
+static volatile int *stage;
 
 
 static inline rump_process_t *process_from_id(int id)
@@ -409,7 +410,6 @@ void launch_process(const char *bin_name, int id, uint64_t period, void *stage, 
 
 }
 
-static volatile int *stage;
 
 static int timer_callback(uintptr_t id)
 {
@@ -451,6 +451,10 @@ static void output_data(int id) {
     printf("%lu\t%d\t%d\n", stage, missed, n);
 }
 
+#if CONFIG_NUM_CRITICALITIES == 1
+#define seL4_MaxCrit 2
+#endif
+
 
 static seL4_Word idle_thread_util[seL4_MaxCrit+1];
 static seL4_Word total_thread_util[seL4_MaxCrit+1];
@@ -468,8 +472,29 @@ static int benchmark_callback(uintptr_t id)
 
     *stage = *stage + 1;
     if (*stage <= seL4_MaxCrit) {
-        int error = seL4_SchedControl_SetCriticality(simple_get_sched_ctrl(&env.simple, 0), *stage);
+        int error;
+#if CONFIG_NUM_CRITICALITIES > 1
+        error = seL4_SchedControl_SetCriticality(simple_get_sched_ctrl(&env.simple, 0), *stage);
         ZF_LOGF_IF(error, "Failed to set criticality");
+#else 
+        switch (*stage) {
+            case 1:
+                /* boost 2 thread */
+                error = seL4_TCB_SetPriority(process_from_id(1)->process.thread.tcb.cptr, 7);
+                ZF_LOGF_IF(error, "Failed to set prio");
+
+                error = seL4_TCB_SetPriority(process_from_id(2)->process.thread.tcb.cptr, 9);
+                ZF_LOGF_IF(error, "Failed to set prio");
+                break;
+            case 2:
+                /* boost 1 threads */
+                error = seL4_TCB_SetPriority(process_from_id(1)->process.thread.tcb.cptr, 10);
+                ZF_LOGF_IF(error, "Failed to set prio");
+                break;
+            default: 
+                ZF_LOGF("WTF %d", *stage);
+        }
+#endif
     } else {
 
         output_data(1);
@@ -575,8 +600,11 @@ run_rr(void)
     stage = (int *) stage_addr;
     *stage = 0;
 
-    int error = seL4_TCB_SetCriticality(simple_get_tcb(&env.simple), seL4_MaxCrit);
+    int error;
+#if CONFIG_NUM_CRITICALITIES > 1
+    error = seL4_TCB_SetCriticality(simple_get_tcb(&env.simple), seL4_MaxCrit);
     ZF_LOGF_IF(error, "Failed to set criticality");
+#endif
 
     launch_process("susan", 1, 180 * NS_IN_MS, stage_addr, 1, seL4_MinCrit + 2);
     launch_process("cjpeg", 2, 100 * NS_IN_MS, stage_addr, 3, seL4_MinCrit + 1);
