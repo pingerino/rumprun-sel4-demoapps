@@ -32,6 +32,9 @@
 #include <arch_stdio.h>
 #include <utils/circular_buffer.h>
 #include <sel4/benchmark_utilisation_types.h>
+#include <jansson.h>
+
+#include <math.h>
 
 #include <vspace/vspace.h>
 #include "common.h"
@@ -419,16 +422,37 @@ static int timer_callback(uintptr_t id)
     return 0;
 }
 
-static void output_data(int id) {
+static json_t *output_row(int stage, int missed, int n) {
+    json_t *j = json_object();
+    assert(j != NULL);
+    UNUSED int error = json_object_set_new(j, "stage", json_integer(stage));
+    assert(error == 0);
+    error = json_object_set_new(j, "missed", json_integer(missed));
+    assert(error == 0);
+    error = json_object_set_new(j, "jobs", json_integer(n));
+    assert(error == 0);
+    return j;
+}
+
+static json_t *output_data(int id) {
 
     rump_process_t *process = process_from_id(id);
     uint64_t period = process->period;
     uint64_t *data = (uint64_t *) process->results;
+    UNUSED int error;
 
     if (data == NULL) {
-        return;
+        return NULL;
     }
-    printf("%s\nstage\tmissed\tjobs\n", process->bin_name);
+
+    json_t *result = json_object();
+    assert(result != NULL);
+    error = json_object_set_new(result, "Name", json_string(process->bin_name));
+    assert(error == 0);
+
+    json_t *rows = json_array();
+    assert(rows != NULL);
+
     int missed = 0;
     int n = 0;
     uint64_t stage = 0;
@@ -437,7 +461,8 @@ static void output_data(int id) {
         uint64_t finished = data[i+1];
         uint64_t deadline = start + period;
         if (data[i+2] != stage) {
-            printf("%lu\t%d\t%d\n", stage, missed, n);
+            error = json_array_append_new(rows, output_row(stage, missed, n));
+            assert(error == 0);
             n = 0;
             missed = 0;
         }
@@ -448,7 +473,12 @@ static void output_data(int id) {
         n++;
     }
 
-    printf("%lu\t%d\t%d\n", stage, missed, n);
+    error = json_array_append_new(rows, output_row(stage, missed, n));
+    assert(error == 0);
+    error = json_object_set_new(result, "results", rows);
+    assert(error == 0);
+
+    return result;
 }
 
 #if CONFIG_NUM_CRITICALITIES == 1
@@ -458,6 +488,15 @@ static void output_data(int id) {
 
 static seL4_Word idle_thread_util[seL4_MaxCrit+1];
 static seL4_Word total_thread_util[seL4_MaxCrit+1];
+
+static inline json_t *json_real_check(double val)
+{
+    json_t *real = json_real(val);
+    if (!real) {
+        return json_string(isnan(val) ? "nan" : "inf");
+    }
+    return real;
+}
 
 static int benchmark_callback(uintptr_t id)
 {
@@ -469,6 +508,7 @@ static int benchmark_callback(uintptr_t id)
     idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION];
     total_thread_util[*stage] = ipcbuffer[BENCHMARK_TOTAL_UTILISATION];
     seL4_BenchmarkResetLog();
+    UNUSED int error;
 
     *stage = *stage + 1;
     if (*stage <= seL4_MaxCrit) {
@@ -497,16 +537,49 @@ static int benchmark_callback(uintptr_t id)
 #endif
     } else {
 
-        output_data(1);
-        output_data(2);
-        output_data(3);
-        printf("idle %lu, %lu, %lu\n", idle_thread_util[0],
-                                       idle_thread_util[1],
-                                       idle_thread_util[2]);
-        printf("tot  %lu, %lu, %lu\n", total_thread_util[0],
-                                       total_thread_util[1],
-                                       total_thread_util[2]);
-        printf("All is well\n");
+        json_t *results = json_object();
+        assert(results != NULL);
+
+        json_t *rows = json_array();
+        assert(rows != NULL);
+
+        error = json_array_append_new(rows, output_data(1));
+        assert(error == 0);
+
+        error = json_array_append_new(rows, output_data(2));
+        assert(error == 0);
+        
+        error = json_array_append_new(rows, output_data(3));
+        assert(error == 0);
+
+        json_object_set_new(results, "results", rows);
+        assert(error == 0);
+
+        json_t *util = json_array();
+        assert(util != NULL);
+        for (int i = 0; i <= 2; i++) {
+            json_t *j = json_object();
+            assert(j != NULL);
+
+            error = json_object_set_new(j, "stage", json_integer(i));
+            assert(error == 0);
+            
+            error = json_object_set_new(j, "idle", json_real_check(idle_thread_util[i]));
+            assert(error == 0);
+            
+            error = json_object_set_new(j, "total", json_real_check(idle_thread_util[i]));
+            assert(error == 0);
+
+            error = json_array_append_new(util, j);
+            assert(error == 0);
+        }
+        error = json_object_set_new(results, "utilisation", util);
+        assert(error == 0);
+
+        printf("JSON OUTPUT\n");
+        error = json_dumpf(results, stdout, JSON_PRESERVE_ORDER | JSON_INDENT(2));
+        printf("END JSON OUTPUT\n");
+        printf("All is well in the universe.\n");
         abort();
     }
 
