@@ -78,5 +78,8 @@
     <linkfile dest="libs/libelf" src="libelf"/>
     <linkfile dest="libs/libutils" src="libutils"/>
     <linkfile dest="libs/libethdrivers" src="libethdrivers"/>
-  </project>
+	</project>
+	<project name="projects_libs" path="projects/projects_libs" remote="seL4-projects">
+    	<linkfile src="libjansson" dest="libs/libjansson"/>
+	</project>
 </manifest>
