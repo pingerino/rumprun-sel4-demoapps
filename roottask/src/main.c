@@ -567,7 +567,7 @@ static int benchmark_callback(uintptr_t id)
             error = json_object_set_new(j, "idle", json_real_check(idle_thread_util[i]));
             assert(error == 0);
             
-            error = json_object_set_new(j, "total", json_real_check(idle_thread_util[i]));
+            error = json_object_set_new(j, "total", json_real_check(total_thread_util[i]));
             assert(error == 0);
 
             error = json_array_append_new(util, j);
