@@ -31,7 +31,7 @@ arch_copy_IOPort_cap(init_data_t *init, rump_env_t *env, sel4utils_process_t *te
 
 }
 
-uint64_t ccount = 0;
+volatile uint64_t ccount = 0;
 uint64_t prev;
 uint64_t ts;
 

@@ -80,7 +80,7 @@ extern void *log_buffer;
 
 void hog_thread(void *_arg1, void *_arg2, void *_arg3);
 
-extern uint64_t ccount;
+extern volatile uint64_t ccount;
 
 void count_idle(void*, void*, void*);
 

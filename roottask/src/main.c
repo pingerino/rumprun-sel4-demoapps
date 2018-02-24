@@ -33,6 +33,7 @@
 #include <utils/circular_buffer.h>
 #include <sel4/benchmark_utilisation_types.h>
 #include <jansson.h>
+#include <platsupport/arch/tsc.h>
 
 #include <math.h>
 
@@ -78,8 +79,8 @@ extern reservation_t muslc_brk_reservation;
 extern void *muslc_brk_reservation_start;
 extern char _cpio_archive[];
 static volatile int *stage;
-
-
+extern volatile uint64_t ccount;
+uint64_t start;
 static inline rump_process_t *process_from_id(int id)
 {
     return &env.processes[id - 1];
@@ -501,13 +502,12 @@ static inline json_t *json_real_check(double val)
 static int benchmark_callback(uintptr_t id)
 {
     assert(id == 0);
-
-    volatile uint64_t *ipcbuffer = (uint64_t *) &(seL4_GetIPCBuffer()->msg[0]);
-    seL4_BenchmarkFinalizeLog();
-    seL4_BenchmarkGetThreadUtilisation(seL4_CapInitThreadTCB);
-    idle_thread_util[*stage] = ipcbuffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION];
-    total_thread_util[*stage] = ipcbuffer[BENCHMARK_TOTAL_UTILISATION];
-    seL4_BenchmarkResetLog();
+    seL4_Word end = rdtsc_pure();
+    total_thread_util[*stage] = end - start;
+    idle_thread_util[*stage] = ccount;
+    ccount = 0;
+    start = rdtsc_cpuid();
+    
     UNUSED int error;
 
     *stage = *stage + 1;
@@ -716,9 +716,8 @@ run_rr(void)
     bool reply = false;
     seL4_MessageInfo_t info;
 
-    seL4_BenchmarkResetLog();
-
-       while (result == 0) {
+    start = rdtsc_cpuid();
+    while (result == 0) {
 
         if (reply) {
             seL4_SetMR(0, error);
@@ -862,8 +861,8 @@ void *main_continued(void *arg UNUSED)
     ZF_LOGF_IFERR(error, "Failed to bind serial irq");
 
     /* Create idle thread */
-//    error = create_thread_handler(count_idle, 0, 100);
- //   ZF_LOGF_IF(error, "Could not create idle thread");
+    error = create_thread_handler(count_idle, 0, 100);
+    ZF_LOGF_IF(error, "Could not create idle thread");
 
     //if (config_set(CONFIG_USE_HOG_THREAD)) {
         /* Create hog thread */
